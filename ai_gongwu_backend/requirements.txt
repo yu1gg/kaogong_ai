@@ -1,3 +1,9 @@
 fastapi
-uvicorn
+openai
+openai-whisper
+opencv-python-headless
 pydantic
+pydantic-settings
+python-multipart
+torch
+uvicorn[standard]

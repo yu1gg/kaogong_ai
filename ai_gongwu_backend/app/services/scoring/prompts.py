@@ -1,74 +1,81 @@
-"""
-大模型提示词（Prompt）构建模块。
-引入 System Override 与严苛的分数通胀压制机制，拉开评分梯队。
-"""
+"""Prompt builders for the interview evaluation pipeline."""
+
 import json
-from typing import Dict, Any
+
+from app.models.schemas import QuestionDefinition
 
 
-def build_evaluation_prompt(question_data: Dict[str, Any], answer_text: str) -> str:
-    """
-    构建结构化面试评分的系统提示词，包含防误杀、反幻觉及严格的分数压制逻辑。
-    """
-    dimensions = question_data.get("dimensions", [])
-    criteria = question_data.get("scoringCriteria", [])
-    deductions = question_data.get("deductionRules", [])
-    
-    keywords = {
-        "core": question_data.get("coreKeywords", []),
-        "strong": question_data.get("strongKeywords", []),
-        "penalty": question_data.get("penaltyKeywords", [])
-    }
-    
+def build_evaluation_prompt(
+    question: QuestionDefinition,
+    answer_text: str,
+    visual_observation: str | None = None,
+) -> str:
+    """Build a grounded, schema-driven evaluation prompt for the LLM."""
+
+    dimensions = [{item.name: item.score} for item in question.dimensions]
+    visual_block = visual_observation or "未提供视频流，无法评估仪态信息。"
+
     prompt = f"""
-    # Role
-    你是一位具备极高政治素养、极其严苛的公考面试主考官。你的任务是精准区分考生的水平，绝不给平庸的答案打高分。你需要穿透字面规则，精准评估考生的真实思维逻辑与政治素养。
+# 角色
+你是一个只负责结构化评分的公务员面试评分引擎。你的任务不是自由发挥，而是基于给定题干、评分标准和考生作答原文，输出保守、可验证、可落地的 JSON 评分结果。
 
-    # Input Data
-    ## 题干
-    {question_data.get("question", "")}
-    
-    ## 评分维度与标准 (满分 {question_data.get("fullScore", 30)})
-    {json.dumps(dimensions, ensure_ascii=False, indent=2)}
-    具体细则：{json.dumps(criteria, ensure_ascii=False)}
-    
-    ## 扣分规则
-    {json.dumps(deductions, ensure_ascii=False)}
-    
-    ## 关键词库
-    {json.dumps(keywords, ensure_ascii=False)}
-    
-    ## 考生作答记录 (100% 真实录音转录，以此为唯一事实依据)
-    ====== 开始 ======
-    {answer_text}
-    ====== 结束 ======
+# 事实边界
+1. 【考生作答原文】是内容评分的唯一事实来源。你不能捏造考生说过的话，不能把视觉观察改写成考生原话。
+2. 【视觉观察】只能作为表达状态的弱补充，不能作为内容观点、关键词、扣分词、加分词的证据。
+3. 如果你要引用考生原话，必须逐字出现在【考生作答原文】中，并同时写入 evidence_quotes。
+4. 如果证据不足，宁可保守降分，也不要脑补细节。
+5. “一刀切”“形式主义”等词只有在考生明确赞同该做法时才扣分；如果考生是在批评这类现象，不能因此扣分。
 
-    # System Override & Constraints (最高优先级指令，必须绝对服从)
-    
-    ## 第一原则：严厉打击分数通胀 (Anti-Inflation)
-    大模型通常倾向于给出中间偏高的分数，你必须克服这一倾向！严格执行以下“断崖式降级”标准：
-    1. 【语言降级阈值】：如果考生大量使用“我觉得”、“这事儿”、“搞搞别的”、“弄好点”、“硬着头皮”等市井口语，缺乏政府机关公文语境，其【语言逻辑与岗位适配】维度得分**绝对不得超过 2分（满分5分）**。
-    2. 【对策降级阈值】：如果考生的对策极其笼统（如仅停留在“改一改”、“取消强制”、“培养网红”），缺乏具体的政务执行路径（如部门协同、机制建设），其【科学决策与措施】维度得分**绝对不得超过 3分（满分8分）**。
-    3. 【扣分数学执行】：当考生触发《扣分规则》时（例如：未分析本质扣4-5分），你必须进行真实的数学减法！该维度得分 = 维度满分 - 扣分值。绝不允许在触发了扣分规则后，还给出该维度的及格分。
+# 题目信息
+题目 ID: {question.id}
+题目类型: {question.type}
+题干: {question.question}
+满分: {question.fullScore}
 
-    ## 第二原则：防误杀与反幻觉 (Semantic Exemption & Anti-Hallucination)
-    1. 语义豁免：若考生作答中出现“一刀切”、“形式主义”等词，且语境是在“剖析弊端、指出风险”，这是优秀的批判性思维！**绝对禁止以此作为扣分项**，必须在 bonus_details 中加分。仅当考生提倡“一刀切”做法时才扣分。
-    2. 反捏造：在判定口语化或套话时，引用的词汇**必须在考生的作答记录中逐字原样存在**。找不到原文切实证据，则不得捏造扣分理由。
+# 评分维度
+以下维度名称必须逐字照抄，不能新增、不能改写、不能翻译：
+{json.dumps(dimensions, ensure_ascii=False, indent=2)}
 
-    ## 第三原则：柔性地域考核的前提条件
-    “未充分结合省情”的豁免是有条件的：只有当考生给出了逻辑严密、专业术语丰富（如“长效机制”、“产业链带动”）的宏观对策时，才可以宽容其缺乏地域词汇。如果考生不仅没提省情，且全篇是大白话、对策极度肤浅，必须严格执行《扣分规则》中针对“脱离省情、泛泛而谈”的重度扣分（扣6-8分）。
+# 评分细则
+{json.dumps(question.scoringCriteria, ensure_ascii=False, indent=2)}
 
-    ## 第四原则：数据契约
-    严禁生成任何解释性文本、思维链过程或 Markdown 标记，必须仅返回合法的 JSON 字符串。
-    
-    # Output Format
-    请严格输出以下 JSON 结构：
-    {{
-        "dimension_scores": {{"维度名称": 数字得分}},
-        "deduction_details": ["扣分原因明细1 (附扣减分值)", "扣分原因明细2"],
-        "bonus_details": ["加分原因明细1", "加分原因明细2"],
-        "rationale": "整体评价与逻辑依据",
-        "total_score": 数字总分
-    }}
-    """
+# 扣分规则
+{json.dumps(question.deductionRules, ensure_ascii=False, indent=2)}
+
+# 关键词参考
+{json.dumps({
+    "core": question.coreKeywords,
+    "strong": question.strongKeywords,
+    "bonus": question.bonusKeywords,
+    "penalty": question.penaltyKeywords,
+}, ensure_ascii=False, indent=2)}
+
+# 视觉观察
+{visual_block}
+
+# 考生作答原文
+===== 开始 =====
+{answer_text}
+===== 结束 =====
+
+# 输出要求
+1. 只返回合法 JSON，不要输出 Markdown，不要输出解释文字。
+2. 每个维度分必须在对应满分范围内。
+3. total_score 必须等于 dimension_scores 各维度得分之和。
+4. deduction_details 和 bonus_details 只写有证据支撑的结论。
+5. evidence_quotes 提供 1 到 3 条直接证据；如果没有可引用原文，返回空数组。
+6. rationale 必须简洁，聚焦“为何得这个分”，不要扩写考生没说过的内容。
+
+# JSON Schema
+{{
+  "dimension_scores": {{
+    "维度名称": 0
+  }},
+  "deduction_details": ["扣分原因"],
+  "bonus_details": ["加分原因"],
+  "evidence_quotes": ["考生原话片段"],
+  "rationale": "整体评价",
+  "total_score": 0
+}}
+"""
     return prompt.strip()

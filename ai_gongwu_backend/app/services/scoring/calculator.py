@@ -1,81 +1,244 @@
-"""
-评分计算与后处理模块。
-负责大模型输出的 JSON 解析容错、结合关键词匹配修正结果，以及执行硬性业务降级。
-"""
-import copy
+"""Deterministic post-processing for LLM evaluation outputs."""
+
 import json
 import logging
-from typing import Dict, Any, Union
+import re
+from numbers import Number
+from typing import Any, Dict, Iterable, Union
+
+from app.core.config import settings
+from app.models.schemas import EvaluationResult, QuestionDefinition
 
 from .keyword_matcher import match_all_categories
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+DIRECT_QUOTE_PATTERN = re.compile(r"[\"“”'‘’]([^\"“”'‘’]{2,40})[\"“”'‘’]")
+DIRECT_SPEECH_HINTS = (
+    "原话",
+    "提到",
+    "说到",
+    "说了",
+    "讲到",
+    "使用",
+    "出现",
+    "口语",
+    "措辞",
+    "表述",
+    "词语",
+)
+
+
+def _effective_text_length(text: str) -> int:
+    return len(re.sub(r"\s+", "", text))
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, Number):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clean_string_list(values: Iterable[Any]) -> list[str]:
+    cleaned: list[str] = []
+    seen = set()
+
+    for value in values or []:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        cleaned.append(text)
+        seen.add(text)
+
+    return cleaned
+
+
+def _parse_raw_result(raw_llm_result: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    if isinstance(raw_llm_result, dict):
+        return raw_llm_result
+
+    try:
+        clean_str = raw_llm_result.strip().strip("`").removeprefix("json").strip()
+        return json.loads(clean_str)
+    except json.JSONDecodeError as exc:
+        logger.error("大模型返回了非标准 JSON: %s", raw_llm_result)
+        raise ValueError("系统未能成功解析模型评分结果。") from exc
+
+
+def _normalize_dimension_scores(
+    raw_scores: Dict[str, Any],
+    question: QuestionDefinition,
+    validation_notes: list[str],
+) -> Dict[str, float]:
+    expected_dimensions = {item.name: item.score for item in question.dimensions}
+    normalized_scores: Dict[str, float] = {}
+
+    for dimension_name, max_score in expected_dimensions.items():
+        raw_score = raw_scores.get(dimension_name, 0.0)
+        score = _to_float(raw_score, default=0.0)
+        clamped_score = round(min(max(score, 0.0), max_score), 1)
+        if clamped_score != score:
+            validation_notes.append(
+                f"维度 [{dimension_name}] 得分超出范围，已自动收敛到 0-{max_score}。"
+            )
+        normalized_scores[dimension_name] = clamped_score
+
+    unexpected_dimensions = sorted(set(raw_scores) - set(expected_dimensions))
+    if unexpected_dimensions:
+        validation_notes.append(
+            f"模型返回了未定义维度 {unexpected_dimensions}，已自动忽略。"
+        )
+
+    missing_dimensions = [
+        item.name for item in question.dimensions if item.name not in raw_scores
+    ]
+    if missing_dimensions:
+        validation_notes.append(
+            f"模型缺失维度 {missing_dimensions}，已按 0 分补齐。"
+        )
+
+    return normalized_scores
+
+
+def _filter_unsupported_direct_quotes(
+    details: list[str],
+    transcript: str,
+    validation_notes: list[str],
+    field_name: str,
+) -> list[str]:
+    supported: list[str] = []
+    for item in details:
+        quoted_segments = DIRECT_QUOTE_PATTERN.findall(item)
+        if quoted_segments and any(hint in item for hint in DIRECT_SPEECH_HINTS):
+            if not all(segment in transcript for segment in quoted_segments):
+                validation_notes.append(
+                    f"{field_name} 中存在无法在原文核验的直接引语，已自动移除: {item}"
+                )
+                continue
+        supported.append(item)
+    return supported
+
+
+def _validate_evidence_quotes(
+    evidence_quotes: list[str],
+    transcript: str,
+    validation_notes: list[str],
+) -> list[str]:
+    supported_quotes: list[str] = []
+    for quote in evidence_quotes[:3]:
+        if quote in transcript:
+            supported_quotes.append(quote)
+        else:
+            validation_notes.append(
+                f"模型提供的证据引用无法在原文中命中，已忽略: {quote}"
+            )
+    return supported_quotes
+
+
+def _scale_scores_to_cap(
+    scores: Dict[str, float],
+    cap: float,
+) -> Dict[str, float]:
+    current_total = sum(scores.values())
+    if current_total <= 0 or current_total <= cap:
+        return scores
+
+    scaled = {
+        name: round(value * cap / current_total, 1)
+        for name, value in scores.items()
+    }
+    diff = round(cap - sum(scaled.values()), 1)
+    if scaled and diff != 0:
+        first_dimension = next(iter(scaled))
+        scaled[first_dimension] = round(max(scaled[first_dimension] + diff, 0.0), 1)
+    return scaled
+
+
 def apply_post_processing(
-    raw_llm_result: Union[str, Dict[str, Any]], 
-    answer: str, 
-    question_data: Dict[str, Any]
-) -> Dict[str, Any]:
-    """
-    后处理：解析输出 -> 提取关键词 -> 容错校验 -> 硬性规则阻断。
-    """
-    # 1. 安全解析与清洗 (兼容大模型返回字符串或已解析字典的情况)
-    if isinstance(raw_llm_result, str):
-        try:
-            clean_str = raw_llm_result.strip().strip('`').removeprefix('json').strip()
-            parsed_result = json.loads(clean_str)
-        except json.JSONDecodeError:
-            logger.error(f"大模型返回的非标准 JSON: {raw_llm_result}")
-            return {
-                "dimension_scores": {},
-                "deduction_details": ["系统未能成功解析模型评分"],
-                "bonus_details": [],
-                "rationale": "系统判定出现波动，请重试或联系人工复核。",
-                "total_score": 0,
-                "matched_keywords": {}
-            }
-    else:
-        parsed_result = raw_llm_result
-        
-    # 深拷贝保证纯函数特性
-    result = copy.deepcopy(parsed_result)
-    
-    # 2. 获取关键词匹配结果并合并 (保留您原有的严谨逻辑)
-    kw_matches = match_all_categories(answer, question_data)
-    if 'matched_keywords' not in result:
-        result['matched_keywords'] = {}
-        
-    for cat, matched in kw_matches.items():
-        if cat not in result['matched_keywords']:
-            result['matched_keywords'][cat] = matched
+    raw_llm_result: Union[str, Dict[str, Any]],
+    transcript: str,
+    question: QuestionDefinition,
+    visual_observation: str | None = None,
+) -> EvaluationResult:
+    """Normalize the LLM output into a stable API contract."""
 
-    # 3. 根据扣分关键词补充扣分详情
-    penalty_list = kw_matches.get('penalty', [])
-    if penalty_list:
-        deduction_msg = f"触发硬性扣分关键词: {', '.join(penalty_list)}"
-        if 'deduction_details' not in result:
-            result['deduction_details'] = []
-        if deduction_msg not in result['deduction_details']:
-            result['deduction_details'].append(deduction_msg)
+    parsed_result = _parse_raw_result(raw_llm_result)
+    validation_notes: list[str] = []
 
-    # 4. 校验维度分数之和与总分 (接入全局配置)
-    dim_scores = result.get('dimension_scores', {})
-    computed_total = sum(dim_scores.values())
-    given_total = result.get('total_score', 0)
+    dimension_scores = _normalize_dimension_scores(
+        raw_scores=parsed_result.get("dimension_scores", {}),
+        question=question,
+        validation_notes=validation_notes,
+    )
 
+    deduction_details = _filter_unsupported_direct_quotes(
+        _clean_string_list(parsed_result.get("deduction_details", [])),
+        transcript,
+        validation_notes,
+        "deduction_details",
+    )
+    bonus_details = _filter_unsupported_direct_quotes(
+        _clean_string_list(parsed_result.get("bonus_details", [])),
+        transcript,
+        validation_notes,
+        "bonus_details",
+    )
+    evidence_quotes = _validate_evidence_quotes(
+        _clean_string_list(parsed_result.get("evidence_quotes", [])),
+        transcript,
+        validation_notes,
+    )
+
+    matched_keywords = match_all_categories(transcript, question.model_dump())
+    rationale = str(parsed_result.get("rationale", "")).strip()
+    if len(rationale) > settings.MAX_RATIONALE_CHARS:
+        rationale = rationale[: settings.MAX_RATIONALE_CHARS].rstrip() + "..."
+        validation_notes.append("rationale 过长，已自动截断。")
+
+    computed_total = round(sum(dimension_scores.values()), 1)
+    given_total = round(_to_float(parsed_result.get("total_score"), computed_total), 1)
     if abs(computed_total - given_total) > settings.SCORE_TOLERANCE:
-        logger.warning(f"逻辑不一致: 维度分总和({computed_total})与模型总分({given_total})差异过大，强制采纳维度总和。")
-        result['total_score'] = computed_total
+        validation_notes.append(
+            f"模型总分 {given_total} 与维度汇总 {computed_total} 不一致，已采用维度汇总。"
+        )
 
-    # 5. 业务硬性规则阻断：作答字数过少拦截 (接入全局配置)
-    full_score = question_data.get('fullScore', 30.0)
-    if len(answer) < settings.MIN_VALID_WORDS:
-        result["rationale"] = f"【系统降级判定】考生作答内容仅 {len(answer)} 字，无法进行有效评估。" + result.get("rationale", "")
-        result['total_score'] = min(result['total_score'], full_score * settings.MIN_WORDS_PENALTY_RATIO)
-        result.setdefault("deduction_details", []).append(f"作答字数不足 {settings.MIN_VALID_WORDS} 字，触发强制降分。")
+    effective_length = _effective_text_length(transcript)
+    full_score = question.fullScore
+    total_score = computed_total
 
-    # 6. 确保总分不超过满分并保留小数
-    result['total_score'] = round(min(result['total_score'], full_score), 1)
+    if effective_length < settings.MIN_VALID_WORDS:
+        cap = round(full_score * settings.MIN_WORDS_PENALTY_RATIO, 1)
+        dimension_scores = _scale_scores_to_cap(dimension_scores, cap)
+        total_score = round(sum(dimension_scores.values()), 1)
+        deduction_details.append(
+            f"作答有效长度不足 {settings.MIN_VALID_WORDS} 字，系统触发强制降分。"
+        )
+        rationale_prefix = (
+            f"【系统降级判定】有效作答长度仅 {effective_length} 字，评分结果已按短答规则收敛。"
+        )
+        rationale = f"{rationale_prefix}{rationale}" if rationale else rationale_prefix
+    else:
+        total_score = computed_total
 
-    return result
+    total_score = round(min(total_score, full_score), 1)
+
+    if not evidence_quotes:
+        validation_notes.append("模型未提供可核验的原文证据引用。")
+
+    return EvaluationResult(
+        question_id=question.id,
+        question_type=question.type,
+        transcript=transcript,
+        visual_observation=visual_observation,
+        dimension_scores=dimension_scores,
+        deduction_details=deduction_details,
+        bonus_details=bonus_details,
+        evidence_quotes=evidence_quotes,
+        rationale=rationale,
+        total_score=total_score,
+        matched_keywords=matched_keywords,
+        validation_notes=validation_notes,
+    )
