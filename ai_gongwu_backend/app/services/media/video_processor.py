@@ -1,4 +1,14 @@
-"""Media processing helpers for audio/video interview submissions."""
+"""音视频处理模块。
+
+这个文件负责把“原始媒体文件”转换成“可以评分的结构化输入”。
+
+视频处理包含两条线：
+1. 内容线：抽音频 -> Whisper 转文字
+2. 表现线：OpenCV 做一个非常轻量的人脸稳定性分析
+
+最终输出一个统一的 MediaExtractionResult，
+供后面的评分流程使用。
+"""
 
 import logging
 from pathlib import Path
@@ -13,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 
 def extract_audio(video_path: str, output_audio_path: str) -> str:
-    """Extract a mono 16k WAV track from a video via ffmpeg."""
+    """使用 ffmpeg 从视频中提取单声道 16k 音频。
+
+    16k / 单声道是 ASR 很常见的输入格式，通常更省资源。
+    """
 
     command = [
         "ffmpeg",
@@ -37,6 +50,7 @@ def extract_audio(video_path: str, output_audio_path: str) -> str:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # 返回音频路径，供后续 Whisper 使用。
         return output_audio_path
     except FileNotFoundError as exc:
         raise RuntimeError("系统未安装 ffmpeg，无法处理视频文件。") from exc
@@ -45,7 +59,16 @@ def extract_audio(video_path: str, output_audio_path: str) -> str:
 
 
 def analyze_facial_behavior(video_path: str) -> str:
-    """Run a lightweight face-stability analysis on the video."""
+    """执行一个轻量级的视觉分析。
+
+    注意：
+    这里不是做严肃的情绪识别，也不是做人脸身份鉴权。
+    它只是非常简单地观察：
+    - 是否能检测到脸
+    - 头部上下位置变化是否过于频繁
+
+    所以返回结果只能当“弱观察”，不能当强结论。
+    """
 
     if not settings.ENABLE_VISUAL_ANALYSIS:
         return "已关闭视觉分析。"
@@ -60,6 +83,7 @@ def analyze_facial_behavior(video_path: str) -> str:
     cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     face_cascade = cv2.CascadeClassifier(cascade_path)
 
+    # 用 OpenCV 打开视频流，逐帧读取。
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError(f"OpenCV 无法打开视频流: {video_path}")
@@ -68,6 +92,7 @@ def analyze_facial_behavior(video_path: str) -> str:
     if not fps or fps != fps:
         fps = 25.0
 
+    # 没必要逐帧分析，这里按“每秒约 2 帧”的节奏抽样，节省计算。
     frame_step = max(1, int(fps / 2))
     frames_processed = 0
     faces_detected = 0
@@ -100,6 +125,8 @@ def analyze_facial_behavior(video_path: str) -> str:
             frame_height = frame.shape[0]
             center_y = (y + h / 2.0) / frame_height
 
+            # 简单比较连续两次检测到的人脸中心点高度变化，
+            # 估算头部晃动程度。
             if last_center_y is not None and abs(center_y - last_center_y) > 0.05:
                 head_movements += 1
             last_center_y = center_y
@@ -118,10 +145,19 @@ def analyze_facial_behavior(video_path: str) -> str:
 
 
 def process_video(video_path: str) -> MediaExtractionResult:
-    """Extract transcript and optional visual observation from a video file."""
+    """处理视频文件。
+
+    步骤如下：
+    1. 先把视频里的音频提取出来
+    2. 用 Whisper 转成文字
+    3. 用 OpenCV 补一个轻量视觉观察
+    4. 返回统一结构
+    """
 
     temp_audio_path = None
     try:
+        # NamedTemporaryFile(delete=False) 让我们拿到一个真实文件路径，
+        # 便于 ffmpeg 和 Whisper 使用。
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
             temp_audio_path = temp_audio.name
 
@@ -129,6 +165,7 @@ def process_video(video_path: str) -> MediaExtractionResult:
         transcriber = get_transcriber()
         transcript = transcriber.transcribe(temp_audio_path).strip()
         if not transcript:
+            # 即使没识别到内容，也返回兜底文本，防止下游出现空字符串异常。
             transcript = "（未能识别到任何有效的人声作答）"
 
         visual_observation = analyze_facial_behavior(video_path)
@@ -138,6 +175,7 @@ def process_video(video_path: str) -> MediaExtractionResult:
             visual_observation=visual_observation,
         )
     finally:
+        # 及时清理临时音频文件，避免服务器堆积大量 wav。
         if temp_audio_path:
             temp_audio = Path(temp_audio_path)
             if temp_audio.exists():
@@ -145,7 +183,7 @@ def process_video(video_path: str) -> MediaExtractionResult:
 
 
 def process_audio(audio_path: str) -> MediaExtractionResult:
-    """Transcribe an audio-only submission."""
+    """处理纯音频文件。"""
 
     transcriber = get_transcriber()
     transcript = transcriber.transcribe(audio_path).strip()
