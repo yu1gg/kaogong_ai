@@ -28,6 +28,20 @@ class QuestionBankTestCase(unittest.TestCase):
         self.assertEqual(question.id, "HN-LX-20200606-01")
         self.assertGreater(len(question.dimensions), 0)
 
+    def test_imported_question_exposes_reference_metadata(self):
+        # 验证：自动导入的湖南题库也能被题库服务正常读取。
+        question = self.bank.get_question("HN-20200816-01")
+        self.assertEqual(question.sourceDocument, "湖南-税务系统补录-2020-816.doc")
+        self.assertTrue(question.referenceAnswer)
+        self.assertTrue(question.tags)
+        self.assertEqual(len(question.regressionCases), 3)
+        self.assertEqual(
+            [case.label for case in question.regressionCases],
+            ["文档高分基准答案", "程序化中档参考答案", "程序化低档参考答案"],
+        )
+        self.assertTrue(all(case.llmExpectedMin is not None for case in question.regressionCases))
+        self.assertTrue(all(case.llmExpectedMax is not None for case in question.regressionCases))
+
     def test_missing_question_raises(self):
         # 验证：不存在的题目应该抛出清晰异常，而不是返回 None 或直接崩溃。
         with self.assertRaises(QuestionNotFoundError):

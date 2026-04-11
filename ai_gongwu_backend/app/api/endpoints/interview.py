@@ -92,6 +92,9 @@ async def get_question_detail(
         penalty_keywords=question.penaltyKeywords,
         scoring_criteria=question.scoringCriteria,
         deduction_rules=question.deductionRules,
+        source_document=question.sourceDocument,
+        reference_answer=question.referenceAnswer,
+        tags=question.tags,
         score_bands=question.scoreBands,
         regression_cases=question.regressionCases,
     )

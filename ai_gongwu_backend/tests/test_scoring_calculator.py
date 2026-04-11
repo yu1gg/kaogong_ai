@@ -10,6 +10,7 @@ from app.services.scoring.calculator import (
     _compute_rule_based_dimension_scores,
     _extract_salvageable_fragment,
     apply_post_processing,
+    build_deterministic_stage_two_payload,
     prepare_evidence_packet,
 )
 
@@ -19,7 +20,9 @@ class ScoringCalculatorTestCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.question = QuestionBank(settings.QUESTION_DB_PATH).get_question("HN-LX-20200606-01")
+        bank = QuestionBank(settings.QUESTION_DB_PATH)
+        cls.question = bank.get_question("HN-LX-20200606-01")
+        cls.imported_question = bank.get_question("HN-20200816-01")
 
     def test_prepare_evidence_packet_filters_fake_quotes_and_adds_absence_evidence(self):
         transcript = "我觉得要因地制宜，不能一刀切，但没有提河南省情。"
@@ -268,6 +271,64 @@ class ScoringCalculatorTestCase(unittest.TestCase):
         self.assertGreater(scores["中高分1.txt"], scores["28分.txt"])
         self.assertGreater(scores["28分.txt"], scores["26分.txt"])
         self.assertGreater(scores["26分.txt"], scores["21分左右.txt"])
+
+    def test_imported_reference_answer_can_be_scored_high_without_llm(self):
+        transcript = self.imported_question.referenceAnswer
+        evidence_packet, evidence_notes = prepare_evidence_packet(
+            raw_llm_result={},
+            transcript=transcript,
+            question=self.imported_question,
+        )
+        payload = build_deterministic_stage_two_payload(
+            transcript=transcript,
+            question=self.imported_question,
+            evidence_packet=evidence_packet,
+        )
+        result = apply_post_processing(
+            raw_llm_result=payload,
+            transcript=transcript,
+            question=self.imported_question,
+            evidence_packet=evidence_packet,
+            extra_validation_notes=evidence_notes,
+        )
+
+        self.assertGreaterEqual(
+            result.total_score,
+            self.imported_question.fullScore - 3.0,
+        )
+        self.assertTrue(result.evidence_quotes)
+        self.assertTrue(result.matched_keywords["core"])
+
+    def test_reference_answer_similarity_floor_can_rescue_under_scored_imported_answer(self):
+        transcript = self.imported_question.referenceAnswer
+        evidence_packet, evidence_notes = prepare_evidence_packet(
+            raw_llm_result={},
+            transcript=transcript,
+            question=self.imported_question,
+        )
+        low_payload = {
+            "dimension_scores": {
+                item.name: max(0.0, round(item.score * 0.45, 1))
+                for item in self.imported_question.dimensions
+            },
+            "deduction_items": [],
+            "bonus_items": [],
+            "rationale": "模型把高分答案压低了。",
+            "total_score": 12,
+        }
+
+        result = apply_post_processing(
+            raw_llm_result=low_payload,
+            transcript=transcript,
+            question=self.imported_question,
+            evidence_packet=evidence_packet,
+            extra_validation_notes=evidence_notes,
+        )
+
+        self.assertGreaterEqual(result.total_score, self.imported_question.fullScore - 3.0)
+        self.assertTrue(
+            any("参考答案相似度校准" in note for note in result.validation_notes)
+        )
 
 
 if __name__ == "__main__":

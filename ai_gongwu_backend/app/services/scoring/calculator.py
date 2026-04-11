@@ -34,6 +34,7 @@ ORAL_EXPRESSION_PHRASES = (
     "弄好点",
 )
 MAX_ORAL_EVIDENCE_ITEMS = 3
+MAX_KEYWORD_EVIDENCE_ITEMS = 6
 ROLE_MARKERS = (
     "统筹协调",
     "政策指导",
@@ -291,6 +292,37 @@ def _build_deterministic_quote_evidence(transcript: str) -> list[EvidenceItem]:
     return items
 
 
+def _build_keyword_quote_evidence(
+    transcript: str,
+    question: QuestionDefinition,
+) -> list[EvidenceItem]:
+    matched_keywords = match_all_categories(transcript, question.model_dump())
+    category_labels = {
+        "core": "核心关键词",
+        "strong": "强关联关键词",
+        "bonus": "加分关键词",
+        "weak": "弱关联关键词",
+    }
+    priority = ("core", "strong", "bonus", "weak")
+
+    items: list[EvidenceItem] = []
+    for category in priority:
+        for keyword in matched_keywords.get(category, []):
+            items.append(
+                EvidenceItem(
+                    id="",
+                    dimension_hint="",
+                    claim=f"原文提到了{category_labels[category]}“{keyword}”",
+                    evidence_text=keyword,
+                    evidence_type="quote",
+                    stance="positive",
+                )
+            )
+            if len(items) >= MAX_KEYWORD_EVIDENCE_ITEMS:
+                return items
+    return items
+
+
 def _collect_province_markers(question: QuestionDefinition) -> list[str]:
     markers = list(PROVINCE_MARKERS)
     if question.province:
@@ -301,6 +333,26 @@ def _collect_province_markers(question: QuestionDefinition) -> list[str]:
     return markers
 
 
+def _should_enforce_henan_role_absence(question: QuestionDefinition) -> bool:
+    haystack = " ".join(
+        [
+            question.province,
+            question.type,
+            *question.coreKeywords,
+            *question.strongKeywords,
+            *question.weakKeywords,
+            *question.scoringCriteria,
+            *question.deductionRules,
+        ]
+    )
+    return (
+        "河南" in haystack
+        or "省直机关" in haystack
+        or "遴选" in haystack
+        or any(marker in haystack for marker in PROVINCE_MARKERS)
+    )
+
+
 def _build_absence_evidence(
     transcript: str,
     question: QuestionDefinition,
@@ -309,35 +361,39 @@ def _build_absence_evidence(
     transcript_lower = transcript.lower()
     absence_items: list[EvidenceItem] = []
 
-    province_markers = _collect_province_markers(question)
-    found_province_markers = [marker for marker in province_markers if marker.lower() in transcript_lower]
-    found_role_markers = [marker for marker in ROLE_MARKERS if marker.lower() in transcript_lower]
-    if not found_province_markers or not found_role_markers:
-        missing_labels: list[str] = []
-        if not found_province_markers:
-            missing_labels.append("河南省情/发展格局")
-        if not found_role_markers:
-            missing_labels.append("省直机关岗位视角")
+    if _should_enforce_henan_role_absence(question):
+        province_markers = _collect_province_markers(question)
+        found_province_markers = [
+            marker for marker in province_markers if marker.lower() in transcript_lower
+        ]
+        found_role_markers = [marker for marker in ROLE_MARKERS if marker.lower() in transcript_lower]
+        if not found_province_markers or not found_role_markers:
+            missing_labels: list[str] = []
+            if not found_province_markers:
+                province_label = f"{question.province}省情/发展格局" if question.province else "本地省情/发展格局"
+                missing_labels.append(province_label)
+            if not found_role_markers:
+                missing_labels.append("省直机关岗位视角")
 
-        missing_examples: list[str] = []
-        if not found_province_markers:
-            missing_examples.extend(province_markers[:4])
-        if not found_role_markers:
-            missing_examples.extend(ROLE_MARKERS[:4])
+            missing_examples: list[str] = []
+            if not found_province_markers:
+                missing_examples.extend(province_markers[:4])
+            if not found_role_markers:
+                missing_examples.extend(ROLE_MARKERS[:4])
 
-        absence_items.append(
-            EvidenceItem(
-                id="",
-                dimension_hint="语言逻辑与岗位适配",
-                claim="原文未充分体现" + "、".join(missing_labels),
-                evidence_text=(
-                    "原文未出现相关标识词，如"
-                    + "、".join(missing_examples[:6])
-                ),
-                evidence_type="absence",
-                stance="negative",
+            absence_items.append(
+                EvidenceItem(
+                    id="",
+                    dimension_hint="语言逻辑与岗位适配",
+                    claim="原文未充分体现" + "、".join(missing_labels),
+                    evidence_text=(
+                        "原文未出现相关标识词，如"
+                        + "、".join(missing_examples[:6])
+                    ),
+                    evidence_type="absence",
+                    stance="negative",
+                )
             )
-        )
 
     found_measure_markers = [marker for marker in MEASURE_MARKERS if marker in transcript]
     quoted_measure_items = [
@@ -384,12 +440,18 @@ def _scale_scores_to_target(
         }
     else:
         remaining = round(target_total - current_total, 1)
-        growth_order = (
+        preferred_growth_order = (
             "科学决策与措施",
             "危害根源分析",
             "现象解读",
             "语言逻辑与岗位适配",
             "创新思维",
+        )
+        growth_order = list(preferred_growth_order)
+        growth_order.extend(
+            dimension.name
+            for dimension in question.dimensions
+            if dimension.name not in growth_order
         )
         for name in growth_order:
             if remaining <= 0:
@@ -403,7 +465,19 @@ def _scale_scores_to_target(
 
     diff = round(target_total - sum(scaled.values()), 1)
     if scaled and diff != 0:
-        for name in ("科学决策与措施", "危害根源分析", "现象解读", "语言逻辑与岗位适配", "创新思维"):
+        adjustment_order = [
+            "科学决策与措施",
+            "危害根源分析",
+            "现象解读",
+            "语言逻辑与岗位适配",
+            "创新思维",
+        ]
+        adjustment_order.extend(
+            dimension.name
+            for dimension in question.dimensions
+            if dimension.name not in adjustment_order
+        )
+        for name in adjustment_order:
             if name not in scaled:
                 continue
             adjusted = round(
@@ -548,6 +622,291 @@ def _compute_rule_based_dimension_scores(
     return scores, rule_notes
 
 
+def _normalized_similarity(left_text: str, right_text: str) -> float:
+    normalized_left = re.sub(r"\s+", "", left_text or "")[:4000]
+    normalized_right = re.sub(r"\s+", "", right_text or "")[:4000]
+    if not normalized_left or not normalized_right:
+        return 0.0
+    return difflib.SequenceMatcher(a=normalized_left, b=normalized_right).ratio()
+
+
+def _infer_dimension_kind(dimension_name: str, criterion_text: str) -> str:
+    text = f"{dimension_name} {criterion_text}"
+
+    if any(marker in text for marker in ("创新", "创意", "亮点")):
+        return "innovation"
+    if any(
+        marker in text
+        for marker in ("语言", "表达", "宣传语", "词语运用", "感染力", "朗朗上口", "文采")
+    ):
+        return "expression"
+    if any(
+        marker in text
+        for marker in ("措施", "举措", "路径", "方案", "活动", "筹备", "实施", "流程", "工作统筹")
+    ):
+        return "execution"
+    if any(
+        marker in text
+        for marker in ("沟通", "人际", "场景", "现场模拟", "宣讲", "案例", "适老化", "安全保障")
+    ):
+        return "scene"
+    if any(
+        marker in text
+        for marker in ("岗位", "适配", "立意", "出发点", "理解", "内涵", "分析", "现象", "题干", "价值")
+    ):
+        return "analysis"
+    return "generic"
+
+
+def _compute_generic_dimension_scores(
+    transcript: str,
+    question: QuestionDefinition,
+    matched_keywords: Dict[str, list[str]],
+) -> tuple[Dict[str, float], list[str]]:
+    if not question.dimensions:
+        return {}, []
+
+    effective_length = _effective_text_length(transcript)
+    oral_count = len(_unique_matches(transcript, [*ORAL_EXPRESSION_PHRASES, "我觉着"]))
+    structure_count = len(_unique_matches(transcript, STRUCTURE_MARKERS + ("一是", "二是", "三是", "四是")))
+
+    core_total = len(question.coreKeywords)
+    strong_total = len(question.strongKeywords)
+    weak_total = len(question.weakKeywords)
+    bonus_total = len(question.bonusKeywords)
+
+    core_ratio = len(matched_keywords.get("core", [])) / core_total if core_total else 0.0
+    strong_ratio = len(matched_keywords.get("strong", [])) / strong_total if strong_total else 0.0
+    weak_ratio = len(matched_keywords.get("weak", [])) / weak_total if weak_total else 0.0
+    bonus_ratio = len(matched_keywords.get("bonus", [])) / bonus_total if bonus_total else 0.0
+
+    reference_length = _effective_text_length(question.referenceAnswer)
+    length_anchor = max(260, int(reference_length * 0.42)) if reference_length else 360
+    length_ratio = min(effective_length / length_anchor, 1.0)
+    structure_ratio = min(structure_count / 4, 1.0)
+    language_quality = max(0.35, 1.0 - oral_count * 0.16)
+    reference_similarity = _normalized_similarity(transcript, question.referenceAnswer)
+
+    overall_ratio = (
+        0.12
+        + 0.24 * core_ratio
+        + 0.17 * strong_ratio
+        + 0.09 * weak_ratio
+        + 0.08 * bonus_ratio
+        + 0.12 * length_ratio
+        + 0.10 * structure_ratio
+        + 0.08 * language_quality
+        + 0.12 * reference_similarity
+    )
+    overall_ratio = min(max(overall_ratio, 0.0), 1.0)
+
+    generic_notes: list[str] = []
+    if question.referenceAnswer and reference_similarity >= 0.98:
+        overall_ratio = max(overall_ratio, 0.94)
+        generic_notes.append("确定性回退命中了题库高分参考答案，相似度校准已将总分抬至高分区。")
+    elif question.referenceAnswer and reference_similarity >= 0.9 and core_ratio >= 0.4:
+        overall_ratio = max(overall_ratio, 0.88)
+    elif core_ratio >= 0.6 and strong_ratio >= 0.35 and length_ratio >= 0.75:
+        overall_ratio = max(overall_ratio, 0.8)
+
+    if oral_count >= 4 and structure_count <= 1:
+        overall_ratio = min(overall_ratio, 0.58)
+    elif oral_count >= 2 and structure_count <= 1:
+        overall_ratio = min(overall_ratio, 0.7)
+
+    raw_scores: Dict[str, float] = {}
+    for index, dimension in enumerate(question.dimensions):
+        criterion_text = question.scoringCriteria[index] if index < len(question.scoringCriteria) else ""
+        kind = _infer_dimension_kind(dimension.name, criterion_text)
+
+        if kind == "innovation":
+            ratio = min(
+                1.0,
+                0.45 * overall_ratio + 0.55 * max(bonus_ratio, reference_similarity * 0.92),
+            )
+        elif kind == "expression":
+            ratio = min(
+                1.0,
+                0.65 * overall_ratio + 0.2 * structure_ratio + 0.15 * language_quality,
+            )
+        elif kind == "execution":
+            ratio = min(
+                1.0,
+                0.62 * overall_ratio
+                + 0.2 * structure_ratio
+                + 0.18 * max(strong_ratio, core_ratio),
+            )
+        elif kind == "scene":
+            ratio = min(
+                1.0,
+                0.58 * overall_ratio
+                + 0.18 * max(weak_ratio, strong_ratio)
+                + 0.14 * structure_ratio
+                + 0.1 * language_quality,
+            )
+        elif kind == "analysis":
+            ratio = min(
+                1.0,
+                0.7 * overall_ratio + 0.15 * core_ratio + 0.15 * strong_ratio,
+            )
+        else:
+            ratio = overall_ratio
+
+        raw_scores[dimension.name] = _round_score(dimension.score * ratio, dimension.score)
+
+    target_total = round(question.fullScore * overall_ratio, 1)
+    scaled_scores = _scale_scores_to_target(raw_scores, question, target_total)
+    return scaled_scores, generic_notes
+
+
+def _pick_dimension_name(question: QuestionDefinition, markers: Sequence[str]) -> str:
+    for index, dimension in enumerate(question.dimensions):
+        criterion_text = question.scoringCriteria[index] if index < len(question.scoringCriteria) else ""
+        haystack = f"{dimension.name} {criterion_text}"
+        if any(marker in haystack for marker in markers):
+            return dimension.name
+    return question.dimensions[0].name if question.dimensions else ""
+
+
+def _find_evidence_ids(
+    evidence_items: Sequence[EvidenceItem],
+    *,
+    evidence_type: str | None = None,
+    stance: str | None = None,
+    contains: Sequence[str] = (),
+    limit: int = 2,
+) -> list[str]:
+    matches: list[str] = []
+    for item in evidence_items:
+        haystack = f"{item.claim} {item.evidence_text}"
+        if evidence_type and item.evidence_type != evidence_type:
+            continue
+        if stance and item.stance != stance:
+            continue
+        if contains and not any(token in haystack for token in contains):
+            continue
+        matches.append(item.id)
+        if len(matches) >= limit:
+            break
+    return matches
+
+
+def build_deterministic_stage_two_payload(
+    transcript: str,
+    question: QuestionDefinition,
+    evidence_packet: EvidenceExtractionPayload,
+) -> Dict[str, Any]:
+    """在无模型时构造一个可落入统一后处理链路的确定性评分结果。"""
+
+    matched_keywords = match_all_categories(transcript, question.model_dump())
+    dimension_scores, scoring_notes = _compute_rule_based_dimension_scores(
+        transcript=transcript,
+        question=question,
+        matched_keywords=matched_keywords,
+    )
+    if not dimension_scores:
+        dimension_scores, scoring_notes = _compute_generic_dimension_scores(
+            transcript=transcript,
+            question=question,
+            matched_keywords=matched_keywords,
+        )
+
+    language_dimension = _pick_dimension_name(question, ("语言", "表达", "宣传语", "词语"))
+    fit_dimension = _pick_dimension_name(question, ("岗位", "适配", "立意", "出发点", "分析"))
+    execution_dimension = _pick_dimension_name(question, ("措施", "举措", "方案", "流程", "活动", "统筹"))
+    innovation_dimension = _pick_dimension_name(question, ("创新", "创意", "亮点"))
+
+    deduction_items: list[Dict[str, Any]] = []
+    bonus_items: list[Dict[str, Any]] = []
+
+    oral_evidence_ids = _find_evidence_ids(
+        evidence_packet.evidence_items,
+        evidence_type="quote",
+        stance="language",
+    )
+    if oral_evidence_ids:
+        deduction_items.append(
+            {
+                "reason": "原文存在口语化表达，影响岗位化和规范性",
+                "dimension": language_dimension,
+                "evidence_ids": oral_evidence_ids,
+            }
+        )
+
+    fit_absence_ids = _find_evidence_ids(
+        evidence_packet.evidence_items,
+        evidence_type="absence",
+        contains=("未充分体现", "岗位视角", "省情", "发展格局"),
+    )
+    if fit_absence_ids:
+        deduction_items.append(
+            {
+                "reason": "本土化或岗位化表达仍有明显欠缺",
+                "dimension": fit_dimension,
+                "evidence_ids": fit_absence_ids,
+            }
+        )
+
+    structure_absence_ids = _find_evidence_ids(
+        evidence_packet.evidence_items,
+        evidence_type="absence",
+        contains=("结构化措施不足",),
+    )
+    if structure_absence_ids:
+        deduction_items.append(
+            {
+                "reason": "措施展开层次不足，结构化不够清晰",
+                "dimension": execution_dimension,
+                "evidence_ids": structure_absence_ids,
+            }
+        )
+
+    bonus_evidence_ids = _find_evidence_ids(
+        evidence_packet.evidence_items,
+        evidence_type="quote",
+        contains=tuple(matched_keywords.get("bonus", [])),
+    )
+    if bonus_evidence_ids:
+        bonus_items.append(
+            {
+                "reason": "提出了具有辨识度的亮点或创新做法",
+                "dimension": innovation_dimension,
+                "evidence_ids": bonus_evidence_ids,
+            }
+        )
+
+    strong_evidence_ids = _find_evidence_ids(
+        evidence_packet.evidence_items,
+        evidence_type="quote",
+        contains=tuple(matched_keywords.get("strong", [])[:2]),
+    )
+    if strong_evidence_ids:
+        bonus_items.append(
+            {
+                "reason": "原文覆盖了较关键的分析或作答抓手",
+                "dimension": execution_dimension,
+                "evidence_ids": strong_evidence_ids,
+            }
+        )
+
+    rationale_parts = [
+        f"命中核心关键词 {len(matched_keywords.get('core', []))} 个",
+        f"强关联关键词 {len(matched_keywords.get('strong', []))} 个",
+        f"弱关联关键词 {len(matched_keywords.get('weak', []))} 个",
+        f"加分关键词 {len(matched_keywords.get('bonus', []))} 个",
+    ]
+    if scoring_notes:
+        rationale_parts.append("；".join(scoring_notes[:2]))
+
+    return {
+        "dimension_scores": dimension_scores,
+        "deduction_items": deduction_items,
+        "bonus_items": bonus_items,
+        "rationale": "，".join(rationale_parts) + "。",
+        "total_score": round(sum(dimension_scores.values()), 1),
+    }
+
+
 def prepare_evidence_packet(
     raw_llm_result: Union[str, Dict[str, Any]],
     transcript: str,
@@ -599,6 +958,7 @@ def prepare_evidence_packet(
         )
 
     evidence_items.extend(_build_deterministic_quote_evidence(transcript))
+    evidence_items.extend(_build_keyword_quote_evidence(transcript, question))
     evidence_items.extend(_build_absence_evidence(transcript, question, evidence_items))
     evidence_items = _deduplicate_evidence_items(evidence_items)
 
@@ -740,6 +1100,42 @@ def _scale_scores_to_cap(scores: Dict[str, float], cap: float) -> Dict[str, floa
     return scaled
 
 
+def _apply_reference_answer_floor(
+    transcript: str,
+    question: QuestionDefinition,
+    dimension_scores: Dict[str, float],
+    matched_keywords: Dict[str, list[str]],
+    validation_notes: list[str],
+) -> Dict[str, float]:
+    """如果作答与题库高分参考答案高度相似，则避免模型把标杆答案压到中低档。"""
+
+    if not question.referenceAnswer or not dimension_scores:
+        return dimension_scores
+
+    reference_similarity = _normalized_similarity(transcript, question.referenceAnswer)
+    core_hit_count = len(matched_keywords.get("core", []))
+    strong_hit_count = len(matched_keywords.get("strong", []))
+    current_total = round(sum(dimension_scores.values()), 1)
+
+    target_floor = 0.0
+    if reference_similarity >= 0.975:
+        target_floor = max(question.fullScore - 3.0, round(question.fullScore * 0.85, 1))
+    elif (
+        reference_similarity >= 0.94
+        and core_hit_count >= max(1, min(len(question.coreKeywords), 2))
+        and strong_hit_count >= max(1, min(len(question.strongKeywords), 1))
+    ):
+        target_floor = max(question.fullScore - 5.0, round(question.fullScore * 0.8, 1))
+
+    if target_floor > current_total:
+        validation_notes.append(
+            f"参考答案相似度校准已将总分下限抬至 {target_floor:.1f}。"
+        )
+        return _scale_scores_to_target(dimension_scores, question, round(target_floor, 1))
+
+    return dimension_scores
+
+
 def apply_post_processing(
     raw_llm_result: Union[str, Dict[str, Any]],
     transcript: str,
@@ -804,6 +1200,14 @@ def apply_post_processing(
             )
         validation_notes.extend(rule_notes)
         dimension_scores = rule_based_scores
+
+    dimension_scores = _apply_reference_answer_floor(
+        transcript=transcript,
+        question=question,
+        dimension_scores=dimension_scores,
+        matched_keywords=matched_keywords,
+        validation_notes=validation_notes,
+    )
     rationale = str(scoring_payload.rationale or "").strip()
     if len(rationale) > settings.MAX_RATIONALE_CHARS:
         rationale = rationale[: settings.MAX_RATIONALE_CHARS].rstrip() + "..."

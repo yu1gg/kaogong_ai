@@ -50,6 +50,8 @@ class RegressionCase(BaseModel):
     sample_path: str
     expected_min: float = Field(..., ge=0)
     expected_max: float = Field(..., ge=0)
+    llmExpectedMin: Optional[float] = Field(default=None, ge=0)
+    llmExpectedMax: Optional[float] = Field(default=None, ge=0)
     notes: str = ""
 
 
@@ -82,6 +84,11 @@ class QuestionDefinition(BaseModel):
     # 评分标准与扣分规则
     scoringCriteria: List[str] = Field(default_factory=list)
     deductionRules: List[str] = Field(default_factory=list)
+
+    # 题库来源与高分参考答案
+    sourceDocument: str = ""
+    referenceAnswer: str = ""
+    tags: List[str] = Field(default_factory=list)
 
     # 分档与批量回归辅助配置
     scoreBands: List[ScoreBand] = Field(default_factory=list)
@@ -266,6 +273,9 @@ class QuestionDetail(BaseModel):
     penalty_keywords: List[str] = Field(default_factory=list)
     scoring_criteria: List[str] = Field(default_factory=list)
     deduction_rules: List[str] = Field(default_factory=list)
+    source_document: str = ""
+    reference_answer: str = ""
+    tags: List[str] = Field(default_factory=list)
     score_bands: List[ScoreBand] = Field(default_factory=list)
     regression_cases: List[RegressionCase] = Field(default_factory=list)
 

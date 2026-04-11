@@ -1,58 +1,69 @@
-# AI 公考面试测评项目说明
+# AI 公考面试测评项目
 
-## 1. 项目简介
+## 1. 项目定位
 
-这是一个面向“公考面试作答评估”场景的后端项目，核心目标是：
+这是一个面向“公考面试作答测评”的后端项目，目标不是简单让大模型直接打分，而是把评分拆成更可控的工程链路：
 
-1. 接收考生提交的文本、音频或视频作答。
-2. 将媒体内容转换为可分析的文字 transcript。
-3. 结合题库、评分标准和关键词信息，调用大模型进行结构化评分。
-4. 对大模型输出做二次校验，尽量降低格式错误、总分不一致、引用原文不真实等问题。
+1. 接收文本、音频、视频作答。
+2. 将音视频转成可分析的 `transcript`。
+3. 根据 `question_id` 读取题库配置。
+4. 先做“证据抽取”，再做“证据约束评分”。
+5. 对模型输出做确定性校验、修正和收敛。
+6. 支持回归测试、LLM 标定和题库样本迭代。
 
-当前代码主体位于 [ai_gongwu_backend](/home/quyu/ai_interview/ai_gongwu_backend) 目录中。
+当前核心代码位于 [ai_gongwu_backend](/home/quyu/ai_interview/ai_gongwu_backend)。
 
-项目中根目录下的若干 `.txt` 文件，可以理解为不同质量的答题样例文本，适合你后续用来做对比测试。
+---
 
-## 2. 这个项目现在能做什么
+## 2. 当前状态
 
-当前后端具备以下能力：
+截至 2026-04-11，项目已经完成这些核心能力：
 
-1. 提供 FastAPI 接口，支持 Swagger 在线调试。
-2. 支持文本、音频、视频三种输入路径。
-3. 音频/视频可通过 Whisper 做语音转写。
-4. 视频可做一个轻量的人脸稳定性观察。
-5. 评分前会根据题目构造 Prompt。
-6. 评分后会对模型结果进行后处理，修正明显异常。
-7. 返回统一结构的评分结果，便于前端展示和后续扩展。
+1. FastAPI 接口可提供文本、音频、视频测评。
+2. 题库支持目录式多题加载，不再局限单题。
+3. 评分链路已经升级为“两阶段证据评分”：
+   - 第一阶段：只抽取证据
+   - 第二阶段：只基于证据打分
+4. 抽象扣分 / 加分理由必须绑定 `evidence_ids`。
+5. 后处理会校验：
+   - 维度名是否合法
+   - 分项分与总分是否一致
+   - 引用证据是否能在原文中核验
+   - 缺失型扣分是否真的有对应 absence 证据
+6. 已支持测评结果落库和记录查询。
+7. 已新增湖南题库自动导入链路，并生成高 / 中 / 低三档回归样本。
+8. 已提供：
+   - 确定性回归脚本
+   - 真实 LLM 回归 / 标定脚本
+   - `repeat` 多次采样取中位数能力
+   - `writeback` 回写 `llmExpectedMin/Max` 能力
 
-## 3. 为什么这次要做重构和补注释
+当前仓库内除了手工题库外，还包含一套自动生成的湖南题库：
 
-你原来的项目已经有基本雏形，但存在几个常见问题：
+1. 题库目录：`ai_gongwu_backend/assets/questions/generated_hunan/`
+2. 样本目录：`ai_gongwu_backend/assets/regression_samples/generated_hunan/`
+3. 导入脚本：`ai_gongwu_backend/scripts/import_hunan_question_bank.py`
+4. 当前已生成 `29` 道题，每题配套 `high / mid / low` 三档回归样本。
+5. 导入摘要见：`ai_gongwu_backend/assets/questions/generated_hunan/import_summary.txt`
 
-1. `question_id` 传入了接口，但没有真正参与选题。
-2. 视频视觉描述和考生原文混在一起，容易污染大模型判断。
-3. 大模型输出缺少强校验，容易出现：
-   - 维度名写错
-   - 总分与分项分不一致
-   - 模型“脑补”考生原话
-4. 依赖注入、配置管理、路径解析还不够稳定。
-5. 对弱基础读者不够友好，阅读门槛偏高。
+---
 
-所以这次优化主要做了三件事：
+## 3. 目录结构
 
-1. 把项目结构理顺。
-2. 把关键逻辑补强。
-3. 把代码和文档讲明白。
-
-## 4. 项目目录说明
-
-建议你先从这个结构开始理解：
+建议先从下面这个结构理解项目：
 
 ```text
 ai_interview/
 ├── README.md
 ├── docs/
-│   └── 项目修改记录.md
+│   ├── 项目修改记录.md
+│   └── 回归与标定说明.md
+├── sample_sets/
+│   └── README.md
+├── reports/
+│   └── regression/
+│       ├── README.md
+│       └── *.json / *.md
 ├── ai_gongwu_backend/
 │   ├── app/
 │   │   ├── api/
@@ -65,178 +76,136 @@ ai_interview/
 │   │   │   └── schemas.py
 │   │   ├── services/
 │   │   │   ├── flow.py
+│   │   │   ├── evaluation_store.py
 │   │   │   ├── question_bank.py
 │   │   │   ├── llm/
 │   │   │   │   └── client.py
 │   │   │   ├── media/
-│   │   │   │   ├── audio_transcriber.py
-│   │   │   │   └── video_processor.py
 │   │   │   └── scoring/
 │   │   │       ├── prompts.py
-│   │   │       ├── calculator.py
-│   │   │       └── keyword_matcher.py
-│   │   ├── utils/
-│   │   │   └── data_loader.py
+│   │   │       └── calculator.py
 │   │   └── main.py
 │   ├── assets/
 │   │   ├── questions/
 │   │   │   ├── README.md
-│   │   │   └── HN-LX-20200606-01.json
-│   │   └── mock/
-│   │       └── last_result.json
+│   │   │   ├── HN-LX-20200606-01.json
+│   │   │   └── generated_hunan/
+│   │   └── regression_samples/
+│   │       ├── README.md
+│   │       └── generated_hunan/
 │   ├── scripts/
-│   │   └── run_regression.py
+│   │   ├── import_hunan_question_bank.py
+│   │   ├── run_regression.py
+│   │   └── run_llm_regression.py
 │   ├── tests/
-│   │   ├── test_question_bank.py
-│   │   └── test_scoring_calculator.py
 │   ├── requirements.txt
 │   └── run.sh
-├── reports/
-│   └── regression/
-│       └── README.md
-└── 若干答题样例 .txt
+└── 湖南题库源文档 / extracted 文本 / 若干手工样本
 ```
 
-## 5. 核心模块怎么理解
+---
 
-### 5.1 `app/main.py`
+## 4. 三条核心链路
 
-这是 FastAPI 的入口文件，负责：
+### 4.1 测评链路
 
-1. 创建应用对象。
-2. 注册路由。
-3. 提供根路径跳转和健康检查。
-
-你可以把它理解成“后端服务启动总开关”。
-
-### 5.2 `app/api/endpoints/interview.py`
-
-这是接口层，专门做和 HTTP 有关的工作：
-
-1. 接收上传文件。
-2. 读取表单参数。
-3. 处理异常并返回 HTTP 状态码。
-4. 调用业务服务。
-
-如果以后前端调用失败，你第一步通常先看这里。
-
-### 5.3 `app/services/flow.py`
-
-这是最核心的业务编排层，负责把多个子模块串起来：
-
-1. 读取题目。
-2. 解析媒体。
-3. 生成 Prompt。
-4. 调大模型。
-5. 做后处理。
-
-如果你只想看“完整评分流程”，优先读这个文件。
-
-### 5.4 `app/services/question_bank.py`
-
-负责题库加载和查询。
-
-作用是：
-
-1. 启动时把题库 JSON 读入内存。
-2. 通过 `question_id` 找到对应题目。
-3. 保证题目结构合法、ID 不重复。
-
-### 5.5 `app/services/llm/client.py`
-
-负责调用大模型。
-
-里面做了这些保护：
-
-1. 统一 API 入口。
-2. 尽量要求模型返回 JSON。
-3. JSON 解析失败时自动重试。
-4. 尝试从不规范输出中抽取 JSON。
-
-这个模块很重要，因为很多“幻觉问题”并不只来自模型内容本身，也来自输出不稳定。
-
-### 5.6 `app/services/scoring/prompts.py`
-
-负责拼接评分 Prompt。
-
-设计重点是：
-
-1. 题目信息清楚。
-2. 评分标准清楚。
-3. 视觉观察和 transcript 分开。
-4. 明确要求模型提供证据引用。
-
-### 5.7 `app/services/scoring/calculator.py`
-
-这是本项目现在最关键的“防失真”模块。
-
-它会对模型输出做二次校验，主要处理：
-
-1. 维度名错误。
-2. 分数越界。
-3. 总分不一致。
-4. 模型引用了 transcript 中不存在的原话。
-5. 作答太短时的强制降分。
-
-如果你想继续降低幻觉，这个文件一定要重点读。
-
-### 5.8 `app/services/media/*`
-
-这部分负责媒体解析：
-
-1. `audio_transcriber.py`：Whisper 转文字。
-2. `video_processor.py`：视频抽音频 + 视觉观察。
-
-### 5.9 `app/models/schemas.py`
-
-这里定义了系统的数据结构。
-
-你可以把它理解成“接口合同”和“数据模板”。
-只要把这里看懂，很多函数传参和返回值就会清晰很多。
-
-## 6. 当前评分流程
+核心入口是 [flow.py](/home/quyu/ai_interview/ai_gongwu_backend/app/services/flow.py)。
 
 完整流程如下：
 
-1. 前端调用 `/api/v1/interview/evaluate` 或 `/api/v1/interview/evaluate/text`。
-2. 路由层接收输入并做基础校验。
-3. `InterviewFlowService` 根据输入类型选择文本/音频/视频处理路径。
-4. 系统根据 `question_id` 从题库中取出题目信息。
-5. 第一阶段先让模型只抽取可核验的原文证据。
-6. 系统对证据做校验，并补充规则型缺失证据。
-7. 第二阶段再让模型只基于证据包打分。
-8. `calculator.py` 对结果做证据绑定校验、分数校验和最终收敛。
-9. 返回统一 API 响应，并把过程数据落库。
+1. 接口层接收 `question_id` 和输入文件。
+2. 文本直接进入评分；音视频先经过媒体解析。
+3. 根据 `question_id` 从题库中读取单题配置。
+4. 第一阶段 Prompt 只抽取原文证据。
+5. 系统对证据做对齐、补充 absence 证据、结构校验。
+6. 第二阶段 Prompt 只基于证据包打分。
+7. `calculator.py` 做确定性后处理。
+8. 若允许持久化，则把 Prompt、原始输出、最终结果一起落库。
 
-## 7. 这次重点做了哪些优化
+### 4.2 题库导入链路
 
-### 7.1 后端结构优化
+核心脚本是 [import_hunan_question_bank.py](/home/quyu/ai_interview/ai_gongwu_backend/scripts/import_hunan_question_bank.py)。
 
-1. 新增题库服务 `QuestionBank`，真正支持 `question_id` 查询。
-2. 增加统一数据模型，避免返回结构随意变化。
-3. 把服务依赖做成缓存复用，减少重复初始化。
-4. 补充路径解析能力，减少启动目录变化引起的路径报错。
+作用：
 
-### 7.2 幻觉抑制优化
+1. 读取仓库根目录下的湖南题库源文档提取文本。
+2. 解析题干、评分标准、扣分标准、参考答案、标签等信息。
+3. 自动生成题目 JSON。
+4. 自动生成高 / 中 / 低三档回归样本。
+5. 为每题写入：
+   - `scoreBands`
+   - `regressionCases`
+   - `llmExpectedMin`
+   - `llmExpectedMax`
 
-1. 把 transcript 和视觉观察拆开，避免模型把视觉描述当作考生原话。
-2. 第一阶段只抽证据，第二阶段只基于证据评分。
-3. 抽象加扣分理由必须绑定证据 ID。
-4. 后处理阶段会校验引用是否真实出现在 transcript 中。
-5. 如果模型胡乱写维度、总分不一致、理由不绑定证据，会自动修正并记录到 `validation_notes`。
+### 4.3 回归 / 标定链路
 
-### 7.3 可维护性优化
+当前有两套脚本：
 
-1. 核心代码补充了大量中文注释。
-2. 补了测试文件，方便后续回归验证。
-3. 完善了 `requirements.txt`。
-4. 增加了更清晰的模块边界。
+1. [run_regression.py](/home/quyu/ai_interview/ai_gongwu_backend/scripts/run_regression.py)
+   用于确定性 / 常规链路回归。
+2. [run_llm_regression.py](/home/quyu/ai_interview/ai_gongwu_backend/scripts/run_llm_regression.py)
+   用于真实大模型回归、区间标定和回写。
 
-## 8. 环境准备
+推荐顺序：
+
+1. 先重导入题库和样本。
+2. 先跑 `run_regression.py` 看生成样本排序是否合理。
+3. 再跑 `run_llm_regression.py --repeat 3` 看真实模型中位数。
+4. 结果稳定后，再加 `--writeback` 回写 `llmExpectedMin/Max`。
+
+---
+
+## 5. 关键模块说明
+
+### 5.1 [interview.py](/home/quyu/ai_interview/ai_gongwu_backend/app/api/endpoints/interview.py)
+
+接口层，负责：
+
+1. 题目列表与题目详情接口
+2. 文本测评接口
+3. 音视频测评接口
+4. 测评记录列表与详情接口
+
+### 5.2 [schemas.py](/home/quyu/ai_interview/ai_gongwu_backend/app/models/schemas.py)
+
+数据合同层，定义：
+
+1. 题目结构
+2. 两阶段证据结构
+3. 评分结果结构
+4. 题目分档与回归样本结构
+
+当前题库回归相关字段主要是：
+
+1. `scoreBands`
+2. `regressionCases`
+3. `llmExpectedMin`
+4. `llmExpectedMax`
+
+### 5.3 [prompts.py](/home/quyu/ai_interview/ai_gongwu_backend/app/services/scoring/prompts.py)
+
+Prompt 构造层，负责：
+
+1. 第一阶段证据抽取 Prompt
+2. 第二阶段证据约束评分 Prompt
+3. 按题目动态生成本土化 / 岗位化提示，不再写死河南模板
+
+### 5.4 [calculator.py](/home/quyu/ai_interview/ai_gongwu_backend/app/services/scoring/calculator.py)
+
+确定性后处理层，负责：
+
+1. 证据对齐
+2. absence 证据补充
+3. 理由与证据绑定校验
+4. 分数收敛和排序校准
+5. 规则型兜底评分
+
+---
+
+## 6. 环境准备
 
 推荐使用 Python 3.10 及以上版本。
-
-如果你要本地运行，建议步骤如下：
 
 ```bash
 cd /home/quyu/ai_interview
@@ -245,17 +214,25 @@ source .venv/bin/activate
 pip install -r ai_gongwu_backend/requirements.txt
 ```
 
-如果你的机器不方便安装完整依赖，可以分层理解：
+如果你已经在后端目录里维护虚拟环境，也可以直接使用：
 
-1. 最基础运行：`fastapi`、`uvicorn`、`pydantic`、`pydantic-settings`、`python-multipart`
-2. 模型调用：`openai`
-3. 语音转写：`openai-whisper`、`torch`
-4. 视频视觉分析：`opencv-python-headless`
-5. 视频抽音频：系统还需要安装 `ffmpeg`
+```bash
+cd /home/quyu/ai_interview/ai_gongwu_backend
+./venv/bin/pip install -r requirements.txt
+```
 
-## 9. 环境变量配置
+系统依赖建议：
 
-建议在 [ai_gongwu_backend](/home/quyu/ai_interview/ai_gongwu_backend) 目录下创建 `.env` 文件，例如：
+1. `ffmpeg`
+2. `torch`
+3. `openai-whisper`
+4. `opencv-python-headless`
+
+---
+
+## 7. 环境变量
+
+建议在 [ai_gongwu_backend](/home/quyu/ai_interview/ai_gongwu_backend) 下准备 `.env`：
 
 ```env
 LLM_PROVIDER=QWEN
@@ -275,9 +252,16 @@ SCORE_TOLERANCE=2.0
 MAX_RATIONALE_CHARS=400
 ```
 
-## 10. 如何启动项目
+说明：
 
-### 方式一：直接用 uvicorn
+1. `QUESTION_DB_PATH` 现在默认应指向目录，而不是单个题目文件。
+2. 若未配置 `LLM_API_KEY`，系统会回退到确定性评分兜底。
+
+---
+
+## 8. 启动项目
+
+### 方式一：直接启动
 
 ```bash
 cd /home/quyu/ai_interview/ai_gongwu_backend
@@ -291,226 +275,150 @@ cd /home/quyu/ai_interview/ai_gongwu_backend
 bash run.sh
 ```
 
-启动后打开：
+启动后访问：
 
 ```text
 http://127.0.0.1:9000/docs
 ```
 
-## 11. 接口说明
+---
 
-### 11.1 健康检查
+## 9. 主要接口
 
-```http
-GET /health
-```
+### 9.1 题目接口
 
-示例返回：
+1. `GET /api/v1/interview/questions`
+2. `GET /api/v1/interview/questions/{question_id}`
 
-```json
-{
-  "status": "ok",
-  "service": "公考面试AI测评系统",
-  "version": "1.1.0",
-  "question_count": 1
-}
-```
+### 9.2 测评接口
 
-### 11.2 文本测评接口
+1. `POST /api/v1/interview/evaluate`
+   音频 / 视频输入
+2. `POST /api/v1/interview/evaluate/text`
+   文本输入
 
-```http
-POST /api/v1/interview/evaluate/text
-```
+### 9.3 测评记录接口
 
-表单字段：
+1. `GET /api/v1/interview/records`
+2. `GET /api/v1/interview/records/{record_id}`
 
-1. `question_id`
-2. `text_file`
+---
 
-### 11.3 音频/视频测评接口
+## 10. 常用脚本
 
-```http
-POST /api/v1/interview/evaluate
-```
-
-表单字段：
-
-1. `question_id`
-2. `media_file`
-
-### 11.4 题目列表接口
-
-```http
-GET /api/v1/interview/questions
-```
-
-用途：
-
-1. 查看当前加载了哪些题目。
-2. 查看每道题是否已经配置了分档和回归样本。
-
-### 11.5 题目详情接口
-
-```http
-GET /api/v1/interview/questions/{question_id}
-```
-
-用途：
-
-1. 查看单题完整配置。
-2. 联调前端题目选择器。
-3. 核查当前题目的 `scoreBands` 和 `regressionCases`。
-
-## 12. 返回结果字段说明
-
-最终返回数据主要包含：
-
-1. `dimension_scores`
-   表示各维度得分。
-2. `deduction_details`
-   表示扣分原因。
-3. `bonus_details`
-   表示加分原因。
-4. `evidence_quotes`
-   表示模型声称使用的原文证据。
-5. `rationale`
-   表示总体评价。
-6. `total_score`
-   表示最终总分。
-7. `matched_keywords`
-   表示系统自己匹配到的关键词。
-8. `validation_notes`
-   表示系统自动修正了哪些模型问题。
-
-## 13. 如何理解“幻觉”
-
-在这个项目里，常见幻觉不是指“模型胡说八道”这么简单，而是指：
-
-1. 模型引用了考生没说过的话。
-2. 模型把视觉观察误当成考生表达内容。
-3. 模型写了题目中根本不存在的评分维度。
-4. 模型给出的总分和分项分对不上。
-5. 模型在证据不足时仍然下了很重的结论。
-
-当前项目已经加了几层防线，但还不能说完全解决。
-
-## 14. 如何测试项目
-
-### 14.1 代码级测试
+### 10.1 重新导入湖南题库
 
 ```bash
 cd /home/quyu/ai_interview/ai_gongwu_backend
-python -m unittest discover -s tests
+./venv/bin/python scripts/import_hunan_question_bank.py
 ```
 
-### 14.2 语法检查
+执行后会刷新：
 
-```bash
-cd /home/quyu/ai_interview
-python3 -m compileall ai_gongwu_backend/app ai_gongwu_backend/tests
-```
+1. `assets/questions/generated_hunan/`
+2. `assets/regression_samples/generated_hunan/`
+3. `assets/questions/generated_hunan/import_summary.txt`
 
-### 14.3 人工对比测试
-
-建议你直接用根目录已有样例文本反复测，重点观察：
-
-1. 低分文本是否真能拉开差距。
-2. 高分文本是否能命中强关键词和 bonus。
-3. 模型有没有引用不存在的原话。
-4. `validation_notes` 是否频繁出现异常修正。
-
-### 14.4 批量回归测试
-
-项目已经补了专门的批量回归脚本：
+### 10.2 跑确定性回归
 
 ```bash
 cd /home/quyu/ai_interview/ai_gongwu_backend
 ./venv/bin/python scripts/run_regression.py
 ```
 
-可选参数：
+### 10.3 跑真实 LLM 回归
 
-1. `--question-id HN-LX-20200606-01`
-   只跑指定题目。
-2. `--output-dir /path/to/output`
-   自定义输出目录。
-3. `--persist`
-   把回归结果也写入数据库。默认不落库。
+```bash
+cd /home/quyu/ai_interview/ai_gongwu_backend
+./venv/bin/python scripts/run_llm_regression.py --repeat 3
+```
 
-脚本会根据题目 JSON 里的 `regressionCases` 自动读取样本，并在 [reports/regression](/home/quyu/ai_interview/reports/regression) 下生成：
+### 10.4 跑真实 LLM 回归并回写区间
 
-1. `JSON` 明细报表
-2. `Markdown` 汇总报表
+```bash
+cd /home/quyu/ai_interview/ai_gongwu_backend
+./venv/bin/python scripts/run_llm_regression.py --repeat 3 --writeback
+```
 
-## 15. 后续最值得做的优化方向
+说明：
 
-如果你想继续把项目做好，我建议按下面优先级推进：
+1. `--repeat 3` 用多次采样中位数抵消单次模型波动。
+2. `--writeback` 会把新的 `llmExpectedMin/Max` 回写到题目 JSON。
+3. 真正批量标定前，建议先用 `--question-id` 跑小子集。
 
-### 优先级 A：先提高结果可信度
+---
 
-1. 把评分改成“两阶段”：
-   第一阶段只抽证据；
-   第二阶段只基于证据打分。
-2. 保存每次请求的：
-   - transcript
-   - prompt
-   - raw_llm_output
-   - final_result
-3. 对 evidence 缺失或 validation_notes 过多的结果打上人工复核标记。
+## 11. 题库与样本文件怎么理解
 
-### 优先级 B：提高工程可用性
+### 11.1 单题 JSON
 
-1. 加数据库，保存测评记录。
-2. 增加日志追踪和请求 ID。
-3. 增加统一异常处理中间件。
-4. 增加 Docker 部署文件。
+每题一个 JSON，至少包含：
 
-### 优先级 C：提高模型效果
+1. `id`
+2. `type`
+3. `province`
+4. `fullScore`
+5. `question`
+6. `dimensions`
 
-1. 引入更稳定的评分模板。
-2. 扩充题库，不要只依赖单题数据。
-3. 做少量人工标注数据，用于对比模型评分偏差。
-4. 按题型拆分 Prompt，不要所有题共用一套评分策略。
-5. 每道题单独维护 `scoreBands` 和 `regressionCases`，不要跨题复用同一套阈值。
+建议同时包含：
 
-## 16. 初学者建议怎么读这个项目
+1. `scoreBands`
+2. `regressionCases`
+3. `sourceDocument`
+4. `referenceAnswer`
+5. `tags`
 
-推荐阅读顺序：
+### 11.2 regressionCases
 
-1. 先读 [README.md](/home/quyu/ai_interview/README.md)
-2. 再读 [schemas.py](/home/quyu/ai_interview/ai_gongwu_backend/app/models/schemas.py)
-3. 再读 [main.py](/home/quyu/ai_interview/ai_gongwu_backend/app/main.py)
-4. 再读 [interview.py](/home/quyu/ai_interview/ai_gongwu_backend/app/api/endpoints/interview.py)
-5. 再读 [flow.py](/home/quyu/ai_interview/ai_gongwu_backend/app/services/flow.py)
-6. 最后重点读：
-   - [prompts.py](/home/quyu/ai_interview/ai_gongwu_backend/app/services/scoring/prompts.py)
-   - [client.py](/home/quyu/ai_interview/ai_gongwu_backend/app/services/llm/client.py)
-   - [calculator.py](/home/quyu/ai_interview/ai_gongwu_backend/app/services/scoring/calculator.py)
+当前约定每题至少有 3 条：
 
-## 17. 相关文档
+1. 文档高分基准答案
+2. 程序化中档参考答案
+3. 程序化低档参考答案
 
-本次修改记录见：
+其中：
 
-[项目修改记录](/home/quyu/ai_interview/docs/项目修改记录.md)
+1. `expected_min/max` 主要对应当前确定性排序结果
+2. `llmExpectedMin/Max` 对应真实大模型回归后的推荐区间
 
-如果你后面继续改项目，建议每做一轮重构都追加记录，这样你自己回头看会非常轻松。
+### 11.3 generated_hunan
 
-## 18. 样本分类入口
+这是脚本自动生成目录，不建议手工逐个改动。  
+如果你调整了导入或样本生成规则，应重新运行导入脚本，让生成产物整体刷新。
 
-为了区分“通用高分”和“河南省直高分”，已经新增分类目录：
+---
 
-1. [sample_sets/通用高分](/home/quyu/ai_interview/sample_sets/通用高分)
-2. [sample_sets/河南省直高分](/home/quyu/ai_interview/sample_sets/河南省直高分)
-3. [sample_sets/非高分参考](/home/quyu/ai_interview/sample_sets/非高分参考)
-4. 分类说明见 [sample_sets/README.md](/home/quyu/ai_interview/sample_sets/README.md)
+## 12. 当前文档索引
 
-## 19. 多题扩展建议
+1. [docs/项目修改记录.md](/home/quyu/ai_interview/docs/项目修改记录.md)
+2. [docs/回归与标定说明.md](/home/quyu/ai_interview/docs/回归与标定说明.md)
+3. [ai_gongwu_backend/assets/questions/README.md](/home/quyu/ai_interview/ai_gongwu_backend/assets/questions/README.md)
+4. [ai_gongwu_backend/assets/regression_samples/README.md](/home/quyu/ai_interview/ai_gongwu_backend/assets/regression_samples/README.md)
+5. [reports/regression/README.md](/home/quyu/ai_interview/reports/regression/README.md)
+6. [sample_sets/README.md](/home/quyu/ai_interview/sample_sets/README.md)
 
-现在题库已经支持“目录式多题配置”：
+---
 
-1. 每道题单独一个 JSON，放在 [assets/questions](/home/quyu/ai_interview/ai_gongwu_backend/assets/questions)。
-2. 题目文件名建议直接用 `question_id.json`。
-3. 每道题都建议同时维护：
-   - `scoreBands`
-   - `regressionCases`
-4. 新增题目后，直接跑一次 `scripts/run_regression.py` 做回归，不要只靠人工点接口。
+## 13. 当前注意事项
+
+1. `sample_sets/` 主要是早期人工整理的河南样本分类目录，不等同于当前 `generated_hunan` 回归集。
+2. 真实 LLM 分数仍然会抖动，所以正式标定建议固定使用 `--repeat 3`。
+3. 组织策划题和综合分析题现在已经拆成独立的中低档模板生成器，但仍建议持续做题型级微调。
+4. 如果修改了：
+   - `prompts.py`
+   - `calculator.py`
+   - `import_hunan_question_bank.py`
+   最好同步重跑导入和回归，而不是只测单条接口。
+
+---
+
+## 14. 后续建议
+
+当前最值得继续推进的方向：
+
+1. 对剩余题型继续做模板化样本生成，而不是统一抽句降档。
+2. 把全量 `repeat=3` 标定跑完，并持续回写 `llmExpectedMin/Max`。
+3. 为关键题型建立人工标注对照集，校验 LLM 中位数与人工目标分差。
+4. 给回归脚本补题型分组统计和异常样本自动汇总。
+5. 对测评记录增加“人工复核状态”和“版本号”字段，便于后续追踪。

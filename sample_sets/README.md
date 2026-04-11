@@ -1,5 +1,20 @@
 # 样本分类说明
 
+## 使用前先看
+
+这个目录是项目早期整理的“河南样本人工分类”。
+
+它和当前真实回归集不是一回事：
+
+1. 这里主要用于人工理解“通用高分 / 河南省直高分 / 非高分参考”的区别。
+2. 当前脚本真正批量回归使用的是 `ai_gongwu_backend/assets/regression_samples/generated_hunan/`。
+3. `sample_sets/` 不会被 `run_regression.py` 或 `run_llm_regression.py` 直接自动读取。
+
+所以：
+
+1. 如果你要做规则理解、Prompt 对照，可参考这里。
+2. 如果你要做批量回归、LLM 标定、区间回写，请以 `generated_hunan` 为准。
+
 ## 分类标准
 
 ### 通用高分

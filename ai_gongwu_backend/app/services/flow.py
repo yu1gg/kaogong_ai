@@ -21,7 +21,11 @@ from app.services.evaluation_store import EvaluationStore
 from app.services.llm.client import LLMClient
 from app.services.media.video_processor import process_audio, process_video
 from app.services.question_bank import QuestionBank
-from app.services.scoring.calculator import apply_post_processing, prepare_evidence_packet
+from app.services.scoring.calculator import (
+    apply_post_processing,
+    build_deterministic_stage_two_payload,
+    prepare_evidence_packet,
+)
 from app.services.scoring.prompts import (
     EVIDENCE_EXTRACTION_SYSTEM_MESSAGE,
     EVIDENCE_SCORING_SYSTEM_MESSAGE,
@@ -88,6 +92,16 @@ class InterviewFlowService:
 
         question = self.question_bank.get_question(question_id)
 
+        if self.llm_client.client is None:
+            logger.info("LLM 未初始化，当前题目将回退到确定性证据评分。question_id=%s", question_id)
+            return self._execute_deterministic_fallback(
+                question_id=question_id,
+                question=question,
+                extraction_result=extraction_result,
+                persist=persist,
+                fallback_reason="LLM 客户端未初始化，已回退到确定性证据评分。",
+            )
+
         evidence_prompt = build_evidence_extraction_prompt(
             question=question,
             answer_text=extraction_result.transcript,
@@ -125,7 +139,20 @@ class InterviewFlowService:
             system_message=EVIDENCE_SCORING_SYSTEM_MESSAGE,
         )
         if scoring_generation is None:
-            raise RuntimeError("第二阶段证据评分失败或返回结果无法解析。")
+            logger.warning("第二阶段证据评分失败，已回退到确定性证据评分。question_id=%s", question_id)
+            return self._execute_deterministic_fallback(
+                question_id=question_id,
+                question=question,
+                extraction_result=extraction_result,
+                persist=persist,
+                evidence_packet=evidence_packet,
+                evidence_notes=evidence_notes,
+                fallback_reason="第二阶段证据评分失败，已回退到确定性证据评分。",
+                evidence_prompt=evidence_prompt,
+                scoring_prompt=scoring_prompt,
+                evidence_raw_content=evidence_raw_content,
+                evidence_raw_payload=evidence_raw_payload,
+            )
 
         final_result = apply_post_processing(
             raw_llm_result=scoring_generation.parsed_payload,
@@ -172,6 +199,89 @@ class InterviewFlowService:
                 "stage_one": evidence_raw_payload,
                 "validated_evidence": evidence_packet.model_dump(mode="json"),
                 "stage_two": scoring_generation.parsed_payload,
+            },
+            final_result=final_result,
+        )
+
+    def _execute_deterministic_fallback(
+        self,
+        *,
+        question_id: str,
+        question,
+        extraction_result: MediaExtractionResult,
+        persist: bool,
+        fallback_reason: str,
+        evidence_packet=None,
+        evidence_notes: list[str] | None = None,
+        evidence_prompt: str = "",
+        scoring_prompt: str = "",
+        evidence_raw_content: str = "",
+        evidence_raw_payload: dict | None = None,
+    ) -> EvaluationResult:
+        """无模型或模型失败时的确定性评分兜底。"""
+
+        if evidence_packet is None:
+            evidence_packet, evidence_notes = prepare_evidence_packet(
+                raw_llm_result={},
+                transcript=extraction_result.transcript,
+                question=question,
+            )
+        evidence_notes = list(evidence_notes or [])
+        evidence_notes.insert(0, fallback_reason)
+
+        deterministic_payload = build_deterministic_stage_two_payload(
+            transcript=extraction_result.transcript,
+            question=question,
+            evidence_packet=evidence_packet,
+        )
+        final_result = apply_post_processing(
+            raw_llm_result=deterministic_payload,
+            transcript=extraction_result.transcript,
+            question=question,
+            evidence_packet=evidence_packet,
+            visual_observation=extraction_result.visual_observation,
+            extra_validation_notes=evidence_notes,
+        )
+        final_result = final_result.model_copy(
+            update={
+                "source": extraction_result.source,
+                "source_filename": extraction_result.source_filename,
+            }
+        )
+
+        if not persist:
+            return final_result
+
+        return self.evaluation_store.save_evaluation(
+            question_id=question.id,
+            question_type=question.type,
+            source=extraction_result.source,
+            source_filename=extraction_result.source_filename,
+            transcript=extraction_result.transcript,
+            visual_observation=extraction_result.visual_observation,
+            prompt_text=json.dumps(
+                {
+                    "stage_one_prompt": evidence_prompt,
+                    "stage_two_prompt": scoring_prompt,
+                    "deterministic_fallback": True,
+                },
+                ensure_ascii=False,
+            ),
+            llm_provider=self.llm_client.provider,
+            llm_model_name=self.llm_client.model_name,
+            raw_llm_content=json.dumps(
+                {
+                    "stage_one_raw": evidence_raw_content,
+                    "stage_two_raw": "",
+                    "deterministic_stage_two": deterministic_payload,
+                },
+                ensure_ascii=False,
+            ),
+            raw_llm_payload={
+                "stage_one": evidence_raw_payload or {},
+                "validated_evidence": evidence_packet.model_dump(mode="json"),
+                "stage_two": deterministic_payload,
+                "deterministic_fallback": True,
             },
             final_result=final_result,
         )

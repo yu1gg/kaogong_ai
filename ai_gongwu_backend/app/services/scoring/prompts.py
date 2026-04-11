@@ -17,6 +17,57 @@ EVIDENCE_SCORING_SYSTEM_MESSAGE = (
 )
 
 
+def _format_score(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
+
+
+def _build_local_focus_text(question: QuestionDefinition) -> tuple[str, str]:
+    """按当前题目动态生成“本土化/岗位化”提示，避免河南模板污染其他题。"""
+
+    province_text = f"{question.province}本土化表达" if question.province else "本土化表达"
+    haystack = " ".join(
+        [
+            question.type,
+            question.question,
+            *question.tags,
+            *question.scoringCriteria,
+            *question.deductionRules,
+        ]
+    )
+    if "省直机关" in haystack:
+        fit_text = "省直机关岗位适配度"
+    elif any(marker in haystack for marker in ("岗位", "履职", "税务", "监狱", "公安", "遴选")):
+        fit_text = "岗位适配度"
+    elif any(marker in haystack for marker in ("活动", "组织", "社区", "沟通", "现场模拟")):
+        fit_text = "场景适配度"
+    else:
+        fit_text = "题目要求适配度"
+    return province_text, fit_text
+
+
+def _build_score_band_anchors(question: QuestionDefinition) -> str:
+    """优先使用题库 scoreBands 渲染分档锚点，避免提示词和题目配置脱节。"""
+
+    if question.scoreBands:
+        lines = []
+        for index, band in enumerate(question.scoreBands, start=1):
+            lines.append(
+                f"{index}. {_format_score(band.min_score)}-{_format_score(band.max_score)} 分："
+                f"{band.label}。{band.description or '按该档特征综合判断。'}"
+            )
+        return "\n".join(lines)
+
+    full_score = question.fullScore
+    return "\n".join(
+        [
+            f"1. {_format_score(full_score * 0.8)}-{_format_score(full_score)} 分：高分档。内容完整、结构清楚、贴题度高。",
+            f"2. {_format_score(full_score * 0.65)}-{_format_score(full_score * 0.8 - 0.1)} 分：中高档。主要内容较完整，但深度或适配度略弱。",
+            f"3. {_format_score(full_score * 0.45)}-{_format_score(full_score * 0.65 - 0.1)} 分：基本合格。能答到主干，但结构、细节或表达存在明显短板。",
+            f"4. 0-{_format_score(full_score * 0.45 - 0.1)} 分：明显偏弱。内容单薄、逻辑松散或有效措施较少。",
+        ]
+    )
+
+
 def build_evidence_extraction_prompt(
     question: QuestionDefinition,
     answer_text: str,
@@ -33,7 +84,7 @@ def build_evidence_extraction_prompt(
 
 # 任务规则
 1. 只能抽取在【考生作答原文】中逐字存在的内容。
-2. 不要给分，不要写抽象结论，不要写“未结合河南省情”这类缺失型判断。
+2. 不要给分，不要写抽象结论，不要写“未结合本地省情/岗位要求”这类缺失型判断。
 3. 证据文本 evidence_text 必须是原文中的直接片段。
 4. claim 只描述这条证据说明了什么，但不能脱离 evidence_text 自由发挥。
 5. 如果是明显口语表达，也可以抽取为语言类证据。
@@ -87,6 +138,11 @@ def build_evidence_scoring_prompt(
     """第二阶段：只基于证据包打分。"""
 
     dimensions = [{item.name: item.score} for item in question.dimensions]
+    province_focus, fit_focus = _build_local_focus_text(question)
+    band_anchors = _build_score_band_anchors(question)
+    local_reason_example = (
+        f"未结合{question.province}本地实际展开分析" if question.province else "未体现题目要求的本地实际"
+    )
 
     prompt = f"""
 # 角色
@@ -101,15 +157,12 @@ def build_evidence_scoring_prompt(
 
 # 评分顺序
 1. 先看“通用内容质量”，判断考生是否识别积极意义、问题本质、危害根源、改进措施。
-2. 再看“河南省情 + 省直机关岗位适配度”，判断是否体现本土化、岗位化、政策化表达。
-3. 如果答案通用分析完整，但缺少河南省情或省直机关视角，应判为“中上档降档”，不能直接打入低分区。
+2. 再看“{province_focus} + {fit_focus}”，判断是否体现本土化、岗位化、政策化表达。
+3. 如果答案通用分析完整，但缺少{province_focus}或{fit_focus}，应判为“中上档降档”，不能直接打入低分区。
 4. 语言口语化会拉低“语言逻辑与岗位适配”，但不能吞掉已经被证据支持的分析分和措施分。
 
 # 分档锚点
-1. 24-30 分：河南省直高分。内容完整，且明显体现河南省情、省委精神、省直机关统筹协调和分类指导视角。
-2. 20-23 分：通用高分。内容完整、分析较深、措施较实，但河南本土化或岗位化不足。
-3. 16-19 分：基本合格。能答到主要问题，但深度、结构、措施或表达存在明显短板。
-4. 0-15 分：明显偏弱。内容单薄、逻辑散乱、措施很少，或口语化严重且缺乏有效分析。
+{band_anchors}
 
 # 题目信息
 题目 ID: {question.id}
@@ -139,7 +192,7 @@ def build_evidence_scoring_prompt(
   }},
   "deduction_items": [
     {{
-      "reason": "未结合河南省情展开分析",
+      "reason": "{local_reason_example}",
       "dimension": "现象解读",
       "evidence_ids": ["A1"]
     }}
