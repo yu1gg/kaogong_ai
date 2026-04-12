@@ -261,6 +261,8 @@ MAX_RATIONALE_CHARS=400
 
 ## 8. 启动项目
 
+如果你要看本地启动、日常维护、测试与排障的完整操作手册，请优先阅读 [docs/使用与维护与测试说明.md](docs/使用与维护与测试说明.md)。
+
 ### 方式一：标准命令启动
 
 ```bash
@@ -403,12 +405,15 @@ cd /home/quyu/ai_interview/ai_gongwu_backend
 
 ## 12. 当前文档索引
 
+如果你是日常维护者，建议先看 [docs/使用与维护与测试说明.md](docs/使用与维护与测试说明.md)；本 README 继续主要承担项目总览职责。
+
 1. [docs/项目修改记录.md](/home/quyu/ai_interview/docs/项目修改记录.md)
-2. [docs/回归与标定说明.md](/home/quyu/ai_interview/docs/回归与标定说明.md)
-3. [ai_gongwu_backend/assets/questions/README.md](/home/quyu/ai_interview/ai_gongwu_backend/assets/questions/README.md)
-4. [ai_gongwu_backend/assets/regression_samples/README.md](/home/quyu/ai_interview/ai_gongwu_backend/assets/regression_samples/README.md)
-5. [reports/regression/README.md](/home/quyu/ai_interview/reports/regression/README.md)
-6. [sample_sets/README.md](/home/quyu/ai_interview/sample_sets/README.md)
+2. [docs/使用与维护与测试说明.md](docs/使用与维护与测试说明.md)
+3. [docs/回归与标定说明.md](/home/quyu/ai_interview/docs/回归与标定说明.md)
+4. [ai_gongwu_backend/assets/questions/README.md](/home/quyu/ai_interview/ai_gongwu_backend/assets/questions/README.md)
+5. [ai_gongwu_backend/assets/regression_samples/README.md](/home/quyu/ai_interview/ai_gongwu_backend/assets/regression_samples/README.md)
+6. [reports/regression/README.md](/home/quyu/ai_interview/reports/regression/README.md)
+7. [sample_sets/README.md](/home/quyu/ai_interview/sample_sets/README.md)
 
 ---
 
