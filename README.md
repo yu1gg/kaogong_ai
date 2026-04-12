@@ -261,14 +261,26 @@ MAX_RATIONALE_CHARS=400
 
 ## 8. 启动项目
 
-### 方式一：直接启动
+### 方式一：标准命令启动
 
 ```bash
 cd /home/quyu/ai_interview/ai_gongwu_backend
 uvicorn app.main:app --reload --port 9000
 ```
 
-### 方式二：运行脚本
+### 方式二：直接运行入口文件
+
+```bash
+python /absolute/path/to/ai_gongwu_backend/app/main.py
+```
+
+也支持在 `ai_gongwu_backend` 目录内使用模块方式启动：
+
+```bash
+python -m app.main
+```
+
+### 方式三：运行脚本
 
 ```bash
 cd /home/quyu/ai_interview/ai_gongwu_backend
